@@ -968,6 +968,88 @@ input:focus, select:focus { background: var(--yellow); }
   font-weight: 500;
 }
 
+/* ===== 休憩バー ===== */
+.break-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: rgba(245, 158, 11, 0.18);
+  border: 2px dashed var(--black);
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--black);
+  margin: 4px 0;
+}
+.break-bar .break-icon { font-size: 14px; }
+
+/* ===== 時間編集 ===== */
+.time-tag-editable {
+  background: var(--black);
+  color: var(--paper);
+  font-family: 'Archivo Black', sans-serif;
+  font-size: 10px;
+  padding: 2px 7px;
+  border: 1.5px solid var(--black);
+  cursor: pointer;
+  transition: all 0.1s;
+  letter-spacing: 0.04em;
+}
+.time-tag-editable:hover { background: var(--blue); }
+.time-tag-editable.edited {
+  background: var(--blue);
+  color: var(--paper);
+}
+.time-edit-input {
+  display: inline-block;
+  width: 56px;
+  height: 26px;
+  padding: 0 6px;
+  border: 2px solid var(--black);
+  background: var(--yellow);
+  font-family: 'Archivo Black', sans-serif;
+  font-size: 12px;
+  color: var(--black);
+  text-align: center;
+  outline: none;
+}
+
+/* ===== 頻度棒グラフ ===== */
+.freq-chart { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.freq-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 36px;
+  align-items: center;
+  gap: 10px;
+}
+.freq-label {
+  font-family: 'Noto Sans JP', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+}
+.freq-bar-bg {
+  height: 14px;
+  background: var(--paper);
+  border: 2px solid var(--black);
+  position: relative;
+}
+.freq-bar {
+  height: 100%;
+  background: var(--blue);
+  transition: width 0.3s;
+}
+.freq-bar.zero { background: transparent; }
+.freq-val {
+  font-family: 'Archivo Black', sans-serif;
+  font-size: 13px;
+  text-align: right;
+}
+.freq-val.zero { color: var(--text-tertiary); }
+
 /* ===== 自作バッジ ===== */
 .badge-custom {
   font-family: 'Archivo Black', sans-serif;
@@ -1178,13 +1260,16 @@ const state = {
     people: 8,
     level: '標準',
     selectedSteps: [],
-    stepCounts: {},      // {stepKey: count} 各ステップの本数（1〜3）
+    stepCounts: {},
     preferSato: true,
+    timeBudget: 150,    // 全体時間目安（分）
   },
   menu: [],
-  menuStepMap: {},   // {drillId: stepKey} 各ドリルがどのステップで生成されたかを記録
-  menuParallel: {},  // {drillId: parallelDrillId} スパイクと並行するセッター練習等
+  menuStepMap: {},
+  menuParallel: {},
+  menuDurations: {},   // {drillId: minutes} 個別編集された時間（未編集なら元の値）
   expandedId: null,
+  editingTimeId: null,    // 時間編集中のドリル識別 'id@idx'
   modal: null,
   favorites: loadFavs(),
   customDrills: loadCustomDrills(),
@@ -1216,6 +1301,67 @@ function defaultStepCountsFor(dayType, selectedSteps) {
 function getDrill(id) { return ALL_DRILLS.find(d => d.id === id); }
 function isCustom(d) { return d && d.source === '自作'; }
 function diffNum(s) { return (s || '').length; }
+
+// ドリルの実際の時間（編集済みなら編集値、なければデフォルト）
+function getDrillDuration(d) {
+  if (!d) return 0;
+  if (state.menuDurations && state.menuDurations[d.id] !== undefined && state.menuDurations[d.id] !== null) {
+    return state.menuDurations[d.id];
+  }
+  return d.duration || 0;
+}
+function isDurationEdited(d) {
+  return d && state.menuDurations && state.menuDurations[d.id] !== undefined && state.menuDurations[d.id] !== null;
+}
+
+// ステップ切替で休憩を入れるかの判定
+// アップ系（統一アップ・コーディネーション・身体の使い方・ゲーム形式アップ）の連続中は休憩なし
+function shouldInsertBreak(prevStepKey, nextStepKey) {
+  if (!prevStepKey || prevStepKey === nextStepKey) return false;
+  const NO_BREAK_GROUP = ['warmup', 'coordination', 'body', 'gameWarmup'];
+  // 両方ともアップ系グループ内なら休憩なし
+  if (NO_BREAK_GROUP.includes(prevStepKey) && NO_BREAK_GROUP.includes(nextStepKey)) return false;
+  return true;
+}
+
+// メニュー全体の合計時間（休憩込み）を計算
+function calculateMenuTotal() {
+  let total = 0;
+  let lastStepKey = null;
+  for (const id of state.menu) {
+    const d = getDrill(id);
+    if (!d) continue;
+    const stepKey = state.menuStepMap[id];
+    if (shouldInsertBreak(lastStepKey, stepKey)) {
+      total += 2;  // 休憩2分
+    }
+    total += getDrillDuration(d);
+    lastStepKey = stepKey;
+  }
+  return total;
+}
+
+// 直近 N 日のジャンル別練習回数（同一練習内の同ジャンルは1回扱い）
+function calcGenreFrequency(days) {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const counts = {};
+  for (const g of GENRES) counts[g] = 0;
+  for (const h of state.history) {
+    if (!h.saved_at) continue;
+    if (new Date(h.saved_at) < cutoff) continue;
+    const seenGenres = new Set();
+    for (const id of (h.menu || [])) {
+      const d = getDrill(id);
+      if (!d) continue;
+      seenGenres.add(d.genre);
+    }
+    for (const g of seenGenres) {
+      if (counts[g] !== undefined) counts[g]++;
+    }
+  }
+  return counts;
+}
+
 function spaceOk(d, sp) {
   if (!sp) return true;
   if (d.space === 'どこでも') return true;
@@ -1582,14 +1728,20 @@ function renderInterview() {
         <div class="chips">${levelChip('基礎重視')}${levelChip('標準')}${levelChip('実戦寄り')}</div>
       </div>
       <div class="q">
-        <div class="q-label"><span class="q-num">05</span>佐藤定番を優先</div>
+        <div class="q-label"><span class="q-num">05</span>全体時間目安 <span class="q-hint">休憩込み・あくまで参考値</span></div>
+        <div class="chips">
+          ${[60, 90, 120, 150, 180].map(t => `<button class="chip ${f.timeBudget===t?'selected':''}" data-set-budget="${t}">${t}分</button>`).join('')}
+        </div>
+      </div>
+      <div class="q">
+        <div class="q-label"><span class="q-num">06</span>佐藤定番を優先</div>
         <button class="checkbox-row ${f.preferSato ? 'on' : ''}" data-toggle-sato-pref="1">
           <span class="check">${f.preferSato ? '✓' : ''}</span>
           <span>各ステップで定番メニューを優先して選ぶ</span>
         </button>
       </div>
       <div class="q" style="margin-bottom:0">
-        <div class="q-label"><span class="q-num">06</span>含めるステップ <span class="q-hint">タップで選択 / 連続タップで本数 ×1→×2→×3</span></div>
+        <div class="q-label"><span class="q-num">07</span>含めるステップ <span class="q-hint">タップで選択 / 連続タップで本数 ×1→×2→×3</span></div>
         <div class="chips">${stepInfo.filter(s => !s.hide).map(stepChip).join('')}</div>
       </div>
     </div>
@@ -1614,7 +1766,15 @@ function renderEditor() {
     `;
   }
   const f = state.filters;
-  const total = state.menu.reduce((s, id) => s + (getDrill(id)?.duration || 0), 0);
+  const drillTotal = state.menu.reduce((s, id) => {
+    const d = getDrill(id);
+    return s + (d ? getDrillDuration(d) : 0);
+  }, 0);
+  const grandTotal = calculateMenuTotal(); // 休憩込み
+  const breakTotal = grandTotal - drillTotal;
+  const budget = f.timeBudget || 0;
+  const overBudget = budget > 0 && grandTotal > budget + 5;
+  const underBudget = budget > 0 && grandTotal < budget - 15;
   
   // ステップヘッダー込みでレンダリング
   let listHtml = '';
@@ -1622,10 +1782,13 @@ function renderEditor() {
   
   state.menu.forEach((id, idx) => {
     const stepKey = state.menuStepMap[id];
-    const d = getDrill(id);
     
     // ステップが切り替わったらヘッダーを挿入
     if (stepKey && stepKey !== lastStepKey) {
+      // 休憩判定（最初のステップ以外）
+      if (lastStepKey !== null && shouldInsertBreak(lastStepKey, stepKey)) {
+        listHtml += `<div class="break-bar"><span class="break-icon">☕</span>休憩 2分</div>`;
+      }
       const step = ORDER_FLOW.find(s => s.key === stepKey);
       if (step) {
         const stepIdx = ORDER_FLOW.findIndex(s => s.key === stepKey);
@@ -1637,6 +1800,9 @@ function renderEditor() {
       lastStepKey = stepKey;
     } else if (!stepKey && lastStepKey !== 'manual') {
       // 手動追加分のヘッダー
+      if (lastStepKey !== null) {
+        listHtml += `<div class="break-bar"><span class="break-icon">☕</span>休憩 2分</div>`;
+      }
       listHtml += `<div class="step-header">
         <span class="step-num" style="background:var(--red);color:var(--paper)">追加</span>
         <span class="step-name">手動追加</span>
@@ -1660,10 +1826,13 @@ function renderEditor() {
     <h2>EDITOR</h2>
     <div class="summary-bar">
       <div class="item"><span class="label">種目</span><span class="val">${state.menu.length}</span></div>
-      <div class="item"><span class="label">合計</span><span class="val">${total}分</span></div>
-      <div class="item"><span class="label">スペース</span><span class="val" style="font-size:14px">${f.space}</span></div>
-      <div class="item"><span class="label">人数</span><span class="val">${f.people}</span></div>
+      <div class="item"><span class="label">ドリル計</span><span class="val">${drillTotal}分</span></div>
+      <div class="item"><span class="label">休憩</span><span class="val" style="font-size:14px">+${breakTotal}分</span></div>
+      <div class="item"><span class="label">合計</span><span class="val ${overBudget ? 'warn' : ''}" style="${overBudget ? 'color:var(--red)' : ''}">${grandTotal}分</span></div>
+      ${budget > 0 ? `<div class="item"><span class="label">目安</span><span class="val" style="font-size:14px">${budget}分</span></div>` : ''}
     </div>
+    ${overBudget ? `<p style="margin-bottom:14px;font-size:12px;color:var(--red);font-weight:700">⚠ 目安より${grandTotal - budget}分長くなっています</p>` : ''}
+    ${underBudget ? `<p style="margin-bottom:14px;font-size:12px;color:var(--blue);font-weight:700">ℹ 目安より${budget - grandTotal}分短いです（ステップを追加できます）</p>` : ''}
     <div class="btn-row" style="margin-bottom:18px">
       <button class="btn small warn" data-action="regenerate">↻ 再生成</button>
       <button class="btn small" data-go="interview">条件を変える</button>
@@ -1680,7 +1849,11 @@ function renderDrillCard(id, idx) {
   const isFav = state.favorites.includes(id);
   const isOpen = state.expandedId === id + '@' + idx;
   const sato = isSato(d);
+  const custom = isCustom(d);
   const locked = isLockedDrill(d);
+  const dur = getDrillDuration(d);
+  const edited = isDurationEdited(d);
+  const editingTime = state.editingTimeId === id + '@' + idx;
   
   const actions = locked
     ? `<span class="badge-locked">FIXED</span>
@@ -1692,6 +1865,10 @@ function renderDrillCard(id, idx) {
        <button class="icon-btn ${isFav ? 'fav-on' : ''}" title="fav" data-toggle-fav="${id}">${isFav ? '♥' : '♡'}</button>
        <button class="icon-btn danger" title="del" data-remove="${idx}">×</button>`;
   
+  const timeTagHtml = editingTime
+    ? `<input type="number" class="time-edit-input" id="time-edit-${idx}" min="1" max="120" value="${dur}" data-edit-time-id="${id}@${idx}">`
+    : `<span class="time-tag-editable ${edited ? 'edited' : ''}" data-edit-time="${id}@${idx}" title="クリックで編集">${dur}分${edited ? ' ✎' : ''}</span>`;
+  
   return `
     <div class="drill-card ${locked ? 'locked' : ''}">
       <div class="drill-num">${(idx + 1).toString().padStart(2,'0')}</div>
@@ -1700,11 +1877,12 @@ function renderDrillCard(id, idx) {
           <span class="genre-chip">${escapeHtml(d.genre)}</span>
           <span class="cat-chip">${escapeHtml(d.category || '')}</span>
           ${sato ? '<span class="badge-sato">定番</span>' : ''}
+          ${custom ? '<span class="badge-custom">自作</span>' : ''}
         </div>
         <div class="drill-name" data-toggle-detail="${id}@${idx}">${escapeHtml(d.name)}</div>
         <div class="drill-meta">
           <span class="meta-tag diff">${escapeHtml(d.difficulty || '')}</span>
-          <span class="meta-tag time">${d.duration || '?'}分</span>
+          ${timeTagHtml}
           <span class="meta-tag">${escapeHtml(d.space || '')}</span>
           ${d.min_people > 1 ? `<span class="meta-tag">${d.min_people}人〜</span>` : ''}
         </div>
@@ -2130,10 +2308,32 @@ function renderCustomForm() {
 
 function renderHistory() {
   const list = state.history.slice().sort((a, b) => (b.saved_at || '').localeCompare(a.saved_at || ''));
+  const freq = calcGenreFrequency(30);
+  const maxFreq = Math.max(...Object.values(freq), 1);
+  const hasFreqData = Object.values(freq).some(c => c > 0);
   return `
     <button class="back-btn" data-go="home">← BACK</button>
     <h2>HISTORY</h2>
     <p style="margin-bottom:14px;font-size:13px;color:var(--text-secondary)">${list.length}件の練習を保存中。タップで詳細・振り返りが見られます。</p>
+    ${hasFreqData ? `
+      <div class="card" style="margin-bottom:18px">
+        <div class="section-label">直近30日のジャンル別練習回数</div>
+        <div class="freq-chart">
+          ${GENRES.map(g => {
+            const c = freq[g] || 0;
+            const w = (c / maxFreq) * 100;
+            return `
+              <div class="freq-row">
+                <span class="freq-label">${escapeHtml(g)}</span>
+                <div class="freq-bar-bg"><div class="freq-bar ${c === 0 ? 'zero' : ''}" style="width:${w}%"></div></div>
+                <span class="freq-val ${c === 0 ? 'zero' : ''}">${c}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <p style="margin-top:10px;font-size:11px;color:var(--text-tertiary);font-family:'DM Mono',monospace;letter-spacing:0.04em">※ 1回の練習で同ジャンルは1カウント</p>
+      </div>
+    ` : ''}
     <div class="btn-row" style="margin-bottom:14px">
       <button class="btn small" data-action="export-history">⇩ 履歴をエクスポート</button>
       <button class="btn small" data-action="import-history">⇧ インポート</button>
@@ -2153,13 +2353,19 @@ function renderHistory() {
 
 function renderHistoryCard(h, i) {
   const dateStr = h.saved_at ? new Date(h.saved_at).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
-  const total = (h.menu || []).reduce((s, id) => s + (getDrill(id)?.duration || 0), 0);
+  const total = (h.menu || []).reduce((s, id) => {
+    const d = getDrill(id);
+    if (!d) return s;
+    const editedDur = h.durations && h.durations[id];
+    return s + (editedDur !== undefined ? editedDur : (d.duration || 0));
+  }, 0);
   const reviewed = h.review && (h.review.overall_note || Object.keys(h.review.drills || {}).length > 0);
   return `
     <div class="history-card" data-view-history="${h.id}">
       <div class="h-num">${(i + 1).toString().padStart(2,'0')}</div>
       <div class="h-body">
         <div class="h-name">${escapeHtml(h.name || '無題のメニュー')} ${reviewed ? '<span class="badge-reviewed">振り返り済み</span>' : ''}</div>
+        ${h.theme ? `<div style="font-family:'Noto Sans JP',sans-serif;font-size:12px;color:var(--blue);font-weight:700;margin-bottom:4px">テーマ：${escapeHtml(h.theme)}</div>` : ''}
         <div class="h-meta">
           <span>${escapeHtml(dateStr)}</span>
           <span>${(h.menu || []).length}種目</span>
@@ -2176,7 +2382,14 @@ function renderHistoryDetail() {
   if (!h) { state.view = 'history'; return ''; }
   const review = h.review || { overall_note: '', drills: {} };
   const dateStr = h.saved_at ? new Date(h.saved_at).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
-  const total = (h.menu || []).reduce((s, id) => s + (getDrill(id)?.duration || 0), 0);
+  // 履歴の編集済み時間を取得するヘルパー
+  const histDur = (id) => {
+    const d = getDrill(id);
+    if (!d) return 0;
+    const ed = h.durations && h.durations[id];
+    return ed !== undefined ? ed : (d.duration || 0);
+  };
+  const total = (h.menu || []).reduce((s, id) => s + histDur(id), 0);
   const totalActual = (h.menu || []).reduce((s, id) => s + (review.drills?.[id]?.actual_duration || 0), 0);
   
   let listHtml = '';
@@ -2186,6 +2399,8 @@ function renderHistoryDetail() {
     const r = review.drills?.[id] || {};
     const sato = isSato(d);
     const custom = isCustom(d);
+    const dur = histDur(id);
+    const edited = h.durations && h.durations[id] !== undefined;
     listHtml += `
       <div class="drill-card">
         <div class="drill-num">${(idx + 1).toString().padStart(2,'0')}</div>
@@ -2198,7 +2413,7 @@ function renderHistoryDetail() {
           </div>
           <div class="drill-name">${escapeHtml(d.name)}</div>
           <div class="drill-meta">
-            <span class="meta-tag time">予定 ${d.duration || '?'}分</span>
+            <span class="meta-tag time">予定 ${dur}分${edited ? ' ✎' : ''}</span>
             ${r.actual_duration ? `<span class="meta-tag" style="background:var(--blue);color:var(--paper);font-family:'Archivo Black',sans-serif">実 ${r.actual_duration}分</span>` : ''}
           </div>
           <div class="review-block">
@@ -2219,7 +2434,8 @@ function renderHistoryDetail() {
   return `
     <button class="back-btn" data-go="history">← BACK</button>
     <h2>${escapeHtml(h.name || '無題のメニュー')}</h2>
-    <p style="margin-bottom:14px;font-size:13px;color:var(--text-secondary)">${escapeHtml(dateStr)}</p>
+    <p style="margin-bottom:6px;font-size:13px;color:var(--text-secondary)">${escapeHtml(dateStr)}</p>
+    ${h.theme ? `<p style="margin-bottom:14px;font-size:13px;color:var(--blue);font-weight:700">テーマ：${escapeHtml(h.theme)}</p>` : '<div style="margin-bottom:14px"></div>'}
     <div class="summary-bar">
       <div class="item"><span class="label">種目</span><span class="val">${(h.menu || []).length}</span></div>
       <div class="item"><span class="label">予定</span><span class="val">${total}分</span></div>
@@ -2356,6 +2572,37 @@ function renderModal() {
       </div>
     `;
   }
+  if (m.type === 'save-history') {
+    const now = new Date();
+    const defaultName = now.getFullYear() + '-' +
+      String(now.getMonth() + 1).padStart(2,'0') + '-' +
+      String(now.getDate()).padStart(2,'0') + ' 練習';
+    return `
+      <div class="modal-bg" data-close-modal="1">
+        <div class="modal" data-no-close="1">
+          <div class="modal-header">
+            <div>
+              <div class="modal-title">SAVE TO HISTORY</div>
+              <div class="modal-sub">この練習メニューを履歴に保存</div>
+            </div>
+            <button class="close-btn" data-close-modal="1">×</button>
+          </div>
+          <div class="form-row">
+            <label>メニュー名</label>
+            <input type="text" id="sh-name" value="${escapeHtml(m.name !== undefined ? m.name : defaultName)}">
+          </div>
+          <div class="form-row" style="margin-bottom:0">
+            <label>練習テーマ <span class="hint">（任意・運用方針メモ）</span></label>
+            <input type="text" id="sh-theme" value="${escapeHtml(m.theme || '')}" placeholder="例：サーブミス削減 / レセプション安定化">
+          </div>
+          <div class="btn-row" style="margin-top:14px">
+            <button class="btn primary" data-action="confirm-save-history">▶ 保存</button>
+            <button class="btn" data-close-modal="1">キャンセル</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   return '';
 }
 
@@ -2377,7 +2624,7 @@ function attachListeners() {
       if (i >= 0) {
         state.menu.splice(i, 1);
         delete state.menuStepMap[id];
-        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
         render();
       }
     };
@@ -2404,6 +2651,7 @@ function attachListeners() {
         state.filters = { ...state.filters, ...(last.filters || {}) };
         state.menuStepMap = last.stepMap || {};
         state.menuParallel = last.parallel || {};
+        state.menuDurations = last.durations || {};
         state.view = 'editor'; render();
       }
     };
@@ -2454,6 +2702,9 @@ function attachListeners() {
   document.querySelectorAll('[data-set-level]').forEach(el => {
     el.onclick = () => { state.filters.level = el.dataset.setLevel; render(); };
   });
+  document.querySelectorAll('[data-set-budget]').forEach(el => {
+    el.onclick = () => { state.filters.timeBudget = parseInt(el.dataset.setBudget); render(); };
+  });
   document.querySelectorAll('[data-toggle-sato-pref]').forEach(el => {
     el.onclick = () => { state.filters.preferSato = !state.filters.preferSato; render(); };
   });
@@ -2470,8 +2721,9 @@ function attachListeners() {
       state.menu = result.menu;
       state.menuStepMap = result.stepMap;
       state.menuParallel = result.parallel || {};
+      state.menuDurations = {};
       state.view = 'editor';
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render(); window.scrollTo(0, 0);
     };
   });
@@ -2481,7 +2733,8 @@ function attachListeners() {
       state.menu = result.menu;
       state.menuStepMap = result.stepMap;
       state.menuParallel = result.parallel || {};
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      state.menuDurations = {};
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render(); showToast('再生成しました');
     };
   });
@@ -2495,7 +2748,7 @@ function attachListeners() {
         const above = getDrill(state.menu[i-1]);
         if (isLockedDrill(above)) return;
         [state.menu[i-1], state.menu[i]] = [state.menu[i], state.menu[i-1]];
-        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
         render();
       }
     };
@@ -2506,7 +2759,7 @@ function attachListeners() {
       const i = parseInt(el.dataset.moveDown);
       if (i < state.menu.length - 1) {
         [state.menu[i], state.menu[i+1]] = [state.menu[i+1], state.menu[i]];
-        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
         render();
       }
     };
@@ -2519,7 +2772,7 @@ function attachListeners() {
       state.menu.splice(i, 1);
       delete state.menuStepMap[id];
       delete state.menuParallel[id];
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render();
     };
   });
@@ -2576,7 +2829,7 @@ function attachListeners() {
         state.menuParallel[newId] = hadParallel;
       }
       state.modal = null;
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render(); showToast('差し替え完了');
     };
   });
@@ -2587,7 +2840,7 @@ function attachListeners() {
       state.menu.splice(at, 0, newId);
       // 手動追加分はstepMapに登録しない（編集画面で「追加」ヘッダー扱い）
       state.modal = null;
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render(); showToast('追加しました');
     };
   });
@@ -2597,7 +2850,7 @@ function attachListeners() {
       const id = el.dataset.addToMenu;
       if (!state.menu.includes(id)) {
         state.menu.push(id);
-        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+        saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
         showToast('メニューに追加'); render();
       }
     };
@@ -2618,7 +2871,7 @@ function attachListeners() {
       e.stopPropagation();
       const pid = el.dataset.removeParallel;
       delete state.menuParallel[pid];
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render();
       showToast('並行を解除しました');
     };
@@ -2651,6 +2904,36 @@ function attachListeners() {
   const ag = document.getElementById('add-genre');
   if (ag && state.modal && state.modal.type === 'add') ag.onchange = (e) => { state.modal.genre = e.target.value; render(); };
 
+  document.querySelectorAll('[data-edit-time]').forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      state.editingTimeId = el.dataset.editTime;
+      render();
+      // 入力欄にフォーカス
+      setTimeout(() => {
+        const inp = document.querySelector('[data-edit-time-id]');
+        if (inp) { inp.focus(); inp.select(); }
+      }, 0);
+    };
+  });
+  document.querySelectorAll('[data-edit-time-id]').forEach(el => {
+    const finishEdit = () => {
+      const key = el.dataset.editTimeId;
+      const id = key.split('@')[0];
+      const v = parseInt(el.value);
+      if (!isNaN(v) && v > 0 && v <= 300) {
+        state.menuDurations[id] = v;
+      }
+      state.editingTimeId = null;
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
+      render();
+    };
+    el.onblur = finishEdit;
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finishEdit(); }
+      else if (e.key === 'Escape') { state.editingTimeId = null; render(); }
+    };
+  });
   document.querySelectorAll('[data-close-modal]').forEach(el => {
     el.onclick = (e) => {
       if (e.target.dataset.noClose) return;
@@ -2665,24 +2948,30 @@ function attachListeners() {
   document.querySelectorAll('[data-action="save-history"]').forEach(el => {
     el.onclick = () => {
       if (state.menu.length === 0) { showToast('メニューが空です'); return; }
+      state.modal = { type: 'save-history' };
+      render();
+    };
+  });
+  document.querySelectorAll('[data-action="confirm-save-history"]').forEach(el => {
+    el.onclick = () => {
+      const name = document.getElementById('sh-name')?.value?.trim() || '無題のメニュー';
+      const theme = document.getElementById('sh-theme')?.value?.trim() || '';
       const now = new Date();
-      const defaultName = now.getFullYear() + '-' +
-        String(now.getMonth() + 1).padStart(2,'0') + '-' +
-        String(now.getDate()).padStart(2,'0') + ' 練習';
-      const name = prompt('メニュー名を入力してください', defaultName);
-      if (name === null) return;
       const entry = {
         id: 'hist-' + Date.now(),
-        name: name || defaultName,
+        name: name,
+        theme: theme,
         saved_at: now.toISOString(),
         menu: state.menu.slice(),
         filters: { ...state.filters },
         stepMap: { ...state.menuStepMap },
         parallel: { ...state.menuParallel },
+        durations: { ...state.menuDurations },
         review: { overall_note: '', drills: {} },
       };
       state.history.unshift(entry);
       saveHistory(state.history);
+      state.modal = null;
       showToast('履歴に保存しました');
       render();
     };
@@ -2705,9 +2994,10 @@ function attachListeners() {
       state.menu = h.menu.slice();
       state.menuStepMap = { ...(h.stepMap || {}) };
       state.menuParallel = { ...(h.parallel || {}) };
+      state.menuDurations = { ...(h.durations || {}) };
       state.filters = { ...state.filters, ...(h.filters || {}) };
       state.view = 'editor';
-      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel });
+      saveLastMenu({ menu: state.menu, filters: state.filters, stepMap: state.menuStepMap, parallel: state.menuParallel, durations: state.menuDurations });
       render(); window.scrollTo(0, 0);
       showToast('編集画面に展開しました');
     };
