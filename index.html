@@ -661,6 +661,46 @@ input:focus, select:focus { background: var(--yellow); }
   margin-bottom: 8px; line-height: 1.5;
 }
 .alt-card .alt-compare { display: flex; flex-wrap: wrap; gap: 4px; }
+.alt-card .alt-detail-toggle {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  background: transparent;
+  border: none;
+  color: var(--blue);
+  cursor: pointer;
+  padding: 4px 0;
+  margin-top: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: underline;
+}
+.alt-card .alt-detail-toggle:hover { color: var(--red); }
+.alt-card .alt-detail-section {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--paper);
+  border: 2px solid var(--black);
+  cursor: default;
+  font-size: 12px;
+}
+.alt-card .alt-detail-section h4 {
+  font-family: 'Archivo Black', sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 8px 0 4px;
+  background: var(--black);
+  color: var(--paper);
+  padding: 2px 5px;
+  display: inline-block;
+}
+.alt-card .alt-detail-section h4:first-child { margin-top: 0; }
+.alt-card .alt-detail-section p {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 12px;
+}
 .compare-tag {
   padding: 2px 6px;
   border: 1.5px solid var(--black);
@@ -1153,6 +1193,7 @@ const state = {
   viewingHistoryId: null,    // 詳細表示中の履歴ID
   browse: { q: '', genre: '', space: '', diff: '', sato: false, custom: false },
   manual: { selectedGenre: null, q: '', cat: '', preferSato: true },
+  altExpanded: null,  // alt/addモーダル内で詳細展開しているドリルID
   toast: null,
 };
 
@@ -2223,8 +2264,10 @@ function renderModal() {
             ${(m.excluded && m.excluded.length > 0) ? `<button class="btn small" data-action="reset-alt-excluded">↻ 最初の候補に戻る</button>` : ''}
           ` : `
             <div class="alt-grid">
-              ${alts.map(a => `
-                <div class="alt-card" data-replace-with="${a.id}" data-replace-idx="${m.idx}">
+              ${alts.map(a => {
+                const isExpanded = m.expandedAltId === a.id;
+                return `
+                <div class="alt-card">
                   <div class="alt-name">
                     ${isSato(a) ? '<span class="badge-sato">定番</span>' : ''}
                     ${isCustom(a) ? '<span class="badge-custom">自作</span>' : ''}
@@ -2238,8 +2281,13 @@ function renderModal() {
                   </div>
                   <div class="alt-purpose">${escapeHtml(a.purpose || '')}</div>
                   <div class="alt-compare">${compareTagsHtml(orig, a)}</div>
+                  ${isExpanded ? `<div class="alt-detail-section">${renderDrillDetail(a)}</div>` : ''}
+                  <div class="btn-row" style="margin-top:10px;gap:6px">
+                    <button class="btn small" data-alt-toggle-detail="${a.id}">${isExpanded ? '✕ 詳細を閉じる' : 'ⓘ 詳細を見る'}</button>
+                    <button class="btn small primary" data-replace-with="${a.id}" data-replace-idx="${m.idx}">▶ これに差し替え</button>
+                  </div>
                 </div>
-              `).join('')}
+              `;}).join('')}
             </div>
             <div class="btn-row" style="margin-top:14px">
               ${remaining > 0
@@ -2279,10 +2327,13 @@ function renderModal() {
           </div>
           <p style="margin-bottom:10px;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase">該当：${pool.length}件（最大60件）</p>
           <div class="alt-grid">
-            ${pool.map(d => `
-              <div class="alt-card" data-insert-id="${d.id}">
+            ${pool.map(d => {
+              const isExpanded = m.expandedAltId === d.id;
+              return `
+              <div class="alt-card">
                 <div class="alt-name">
                   ${isSato(d) ? '<span class="badge-sato">定番</span>' : ''}
+                  ${isCustom(d) ? '<span class="badge-custom">自作</span>' : ''}
                   ${escapeHtml(d.name)}
                 </div>
                 <div class="alt-meta">
@@ -2292,8 +2343,13 @@ function renderModal() {
                   <span class="meta-tag time">${d.duration || '?'}分</span>
                 </div>
                 <div class="alt-purpose">${escapeHtml(d.purpose || '')}</div>
+                ${isExpanded ? `<div class="alt-detail-section">${renderDrillDetail(d)}</div>` : ''}
+                <div class="btn-row" style="margin-top:10px;gap:6px">
+                  <button class="btn small" data-alt-toggle-detail="${d.id}">${isExpanded ? '✕ 詳細を閉じる' : 'ⓘ 詳細を見る'}</button>
+                  <button class="btn small primary" data-insert-id="${d.id}">＋ ここに追加</button>
+                </div>
               </div>
-            `).join('')}
+            `;}).join('')}
             ${pool.length === 0 ? '<p style="font-size:13px">該当するドリルがありません。</p>' : ''}
           </div>
         </div>
@@ -2468,7 +2524,17 @@ function attachListeners() {
     };
   });
   document.querySelectorAll('[data-show-alt]').forEach(el => {
-    el.onclick = (e) => { e.stopPropagation(); state.modal = { type: 'alt', idx: parseInt(el.dataset.showAlt), excluded: [] }; render(); };
+    el.onclick = (e) => { e.stopPropagation(); state.modal = { type: 'alt', idx: parseInt(el.dataset.showAlt), excluded: [], expandedAltId: null }; render(); };
+  });
+  document.querySelectorAll('[data-alt-toggle-detail]').forEach(el => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const id = el.dataset.altToggleDetail;
+      if (state.modal) {
+        state.modal.expandedAltId = state.modal.expandedAltId === id ? null : id;
+        render();
+      }
+    };
   });
   document.querySelectorAll('[data-action="next-alt-batch"]').forEach(el => {
     el.onclick = () => {
@@ -2491,7 +2557,7 @@ function attachListeners() {
     };
   });
   document.querySelectorAll('[data-add-at]').forEach(el => {
-    el.onclick = () => { state.modal = { type: 'add', insertAt: parseInt(el.dataset.addAt), query: '', genre: '' }; render(); };
+    el.onclick = () => { state.modal = { type: 'add', insertAt: parseInt(el.dataset.addAt), query: '', genre: '', expandedAltId: null }; render(); };
   });
   document.querySelectorAll('[data-replace-with]').forEach(el => {
     el.onclick = () => {
